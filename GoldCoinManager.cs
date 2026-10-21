@@ -1,507 +1,361 @@
-﻿using System.IO;
+using System.IO;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
-using Microsoft.Win32;
 
-namespace rans0m
+namespace rans0m;
+
+internal static class CoinValues
 {
-    public static class CoinValues
+    public static readonly Dictionary<int, int> ExtensionValues = new()
     {
-        public static readonly Dictionary<int, int> ExtensionValues = new()
-        {
-            { 1, 10 },
-            { 2, 50 },
-            { 3, 100 },
-            { 4, 150 },
-            { 5, 200 },
-            { 6, 500 } // Honeypot
-        };
+        { 1, 10 }, { 2, 50 }, { 3, 100 }, { 4, 150 }, { 5, 200 }
+    };
+    public static int WeightedType() => Global.rng.Next(100) switch
+    {
+        < 40 => 1, < 70 => 2, < 85 => 3, < 93 => 4, _ => 5
+    };
+}
 
-        public static int GetWeightedExtension()
-        {
-            int roll = Global.rng.Next(100);
-            return roll switch
-            {
-                < 40 => 1,  // 40% chance
-                < 70 => 2,  // 30% chance
-                < 85 => 3,  // 15% chance
-                < 93 => 4,  // 8% chance
-                _ => 5      // 7% chance
-            };
-        }
-
-        public static int GetValue(int extension) => ExtensionValues.GetValueOrDefault(extension, 10);
+/// <summary>
+/// The manifest lives exclusively in an isolated per-run LocalAppData session.
+/// With explicit opt-in, generated coin images may also be placed directly in six
+/// approved current-user folders. Never reads/deletes unrelated personal files,
+/// edits registry file associations, traverses personal trees, or removes folders
+/// from those approved real locations.
+/// </summary>
+internal static class GoldCoinManager
+{
+    private sealed class CoinRecord
+    {
+        public string File { get; set; } = "";
+        public string Token { get; set; } = "";
+        public int Value { get; set; }
+        // Only PNG coins use hashes; simulated .gold* files contain their own token.
+        public string Sha256 { get; set; } = "";
     }
 
-    public static class GoldCoinManager
+    private sealed class Manifest
     {
-        private const string RegistryPath = @"Software\RANSOM";
-        private const string RegistryValueName = "GoldCoins";
-        private const string DirRegistryValueName = "GoldDirectories";
+        public string Session { get; set; } = "";
+        public string Placement { get; set; } = nameof(CoinPlacementMode.Simulation);
+        public List<CoinRecord> Coins { get; set; } = new();
+        public List<string> Directories { get; set; } = new();
+    }
 
-        // Should make this configurable
-        private static List<string> targetFolders = new List<string>()
+    private static readonly object Gate = new();
+    private static readonly string SessionParent = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Rans0mAwarenessLab", "Sessions");
+    private static readonly Dictionary<string, CoinRecord> Coins = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<string> OwnedDirectories = new();
+    private static readonly string[] FolderNames =
+    {
+        "Bureau (simulation)", "Documents (simulation)", "Téléchargements (simulation)",
+        "Images (simulation)", "Musique (simulation)", "Vidéos (simulation)"
+    };
+    private static string? SessionId;
+    private static CoinPlacementMode ActivePlacement;
+    public static string? WorkspaceRoot { get; private set; }
+    private static string? ManifestPath => WorkspaceRoot == null ? null : Path.Combine(WorkspaceRoot, "manifest.json");
+
+    public static IReadOnlyList<string> ListActiveCoins()
+    {
+        lock (Gate) return Coins.Keys.Where(File.Exists).OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public static int GenerateCoins(byte[]? imageBytes = null)
+    {
+        lock (Gate)
         {
-            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            if (WorkspaceRoot != null) throw new InvalidOperationException("A lab session is already active");
+            ActivePlacement = Config.CoinPlacement;
+            var dirs = ActivePlacement == CoinPlacementMode.RealUserFolders
+                ? ApprovedRealFolders()
+                : new List<string>();
+            if (ActivePlacement == CoinPlacementMode.RealUserFolders && (dirs.Count == 0 || imageBytes == null || imageBytes.Length == 0))
+                throw new InvalidOperationException("Aucun dossier utilisateur local admissible, ou image de pièce absente.");
+
+            Directory.CreateDirectory(SessionParent);
+            SessionId = Guid.NewGuid().ToString("N");
+            WorkspaceRoot = Path.Combine(SessionParent, SessionId);
+            Directory.CreateDirectory(WorkspaceRoot);
+            using (var marker = new FileStream(Path.Combine(WorkspaceRoot, ".lab-owned"), FileMode.CreateNew)) { }
+            PersistManifest();
+
+            try
+            {
+                if (ActivePlacement == CoinPlacementMode.Simulation)
+                {
+                    foreach (string name in FolderNames)
+                    {
+                        string parent = Path.Combine(WorkspaceRoot, name);
+                        Directory.CreateDirectory(parent);
+                        OwnedDirectories.Add(parent);
+                        PersistManifest();
+                        dirs.Add(parent);
+                        string deeper = Path.Combine(parent, "Dossier " + Global.rng.Next(100, 999));
+                        Directory.CreateDirectory(deeper);
+                        OwnedDirectories.Add(deeper);
+                        PersistManifest();
+                        dirs.Add(deeper);
+                    }
+                }
+
+                string imageHash = imageBytes == null ? "" : Convert.ToHexString(SHA256.HashData(imageBytes));
+                int gold = 0;
+                int needed = (int)Math.Ceiling(Config.RansomAmount * 1.35);
+                int attempts = 0;
+                while (gold < needed && ++attempts <= 500)
+                {
+                    int type = CoinValues.WeightedType();
+                    int value = CoinValues.ExtensionValues[type];
+                    string directory = dirs[Global.rng.Next(dirs.Count)];
+                    string token = Guid.NewGuid().ToString("N");
+                    string file = ActivePlacement == CoinPlacementMode.RealUserFolders
+                        ? Path.Combine(directory, $"RANS0M-Lab-Coin-{token}-G{value}.png")
+                        : Path.Combine(directory, token + ".gold" + type);
+                    var record = new CoinRecord
+                    {
+                        File = file, Token = token, Value = value,
+                        Sha256 = ActivePlacement == CoinPlacementMode.RealUserFolders ? imageHash : ""
+                    };
+
+                    // Persist the intent before creating the file: a crash after creation
+                    // cannot strand an untracked coin. CreateNew never overwrites files.
+                    Coins[file] = record;
+                    PersistManifest();
+                    bool created = false;
+                    try
+                    {
+                        using (var stream = new FileStream(file, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+                        {
+                            created = true;
+                            if (ActivePlacement == CoinPlacementMode.RealUserFolders)
+                                stream.Write(imageBytes!);
+                            else
+                                JsonSerializer.Serialize(stream, new { Session = SessionId, Token = token, Value = value });
+                        }
+                        gold += value;
+                    }
+                    catch (IOException)
+                    {
+                        // This process was the exclusive creator, and the write failed.
+                        // Leave no partially written PNG behind on recoverable errors.
+                        if (created) { try { File.Delete(file); } catch { } }
+                        Coins.Remove(file);
+                        PersistManifest();
+                    }
+                    catch (UnauthorizedAccessException)
+                    {
+                        if (created) { try { File.Delete(file); } catch { } }
+                        Coins.Remove(file);
+                        PersistManifest();
+                    }
+                }
+                if (gold < Config.RansomAmount)
+                    throw new IOException("Impossible de générer assez de pièces dans les dossiers autorisés.");
+                return gold;
+            }
+            catch
+            {
+                // Roll back only cryptographically validated coins created by this run.
+                DeleteAllCoins();
+                throw;
+            }
+        }
+    }
+
+    private static void PersistManifest()
+    {
+        if (ManifestPath == null) return;
+        string temp = ManifestPath + ".tmp";
+        using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write))
+            JsonSerializer.Serialize(stream, new Manifest
+            {
+                Session = SessionId ?? "",
+                Placement = ActivePlacement.ToString(),
+                Coins = Coins.Values.ToList(),
+                Directories = OwnedDirectories.ToList()
+            });
+        File.Move(temp, ManifestPath, true);
+    }
+
+    public static bool TryRedeem(string file, out int amount)
+    {
+        lock (Gate)
+        {
+            amount = 0;
+            string path;
+            try { path = Path.GetFullPath(file); }
+            catch { return false; }
+            if (WorkspaceRoot == null || !Coins.TryGetValue(path, out CoinRecord? coin)) return false;
+            if (!IsPermittedCoinPath(coin, WorkspaceRoot, ActivePlacement) || !IsOurCoin(coin, SessionId, ActivePlacement))
+                return false;
+            try { File.Delete(path); }
+            catch { return false; }
+            amount = coin.Value;
+            Coins.Remove(path);
+            PersistManifest();
+            return true;
+        }
+    }
+
+    private static bool IsOurCoin(CoinRecord coin, string? session, CoinPlacementMode placement)
+    {
+        try
+        {
+            if ((File.GetAttributes(coin.File) & FileAttributes.ReparsePoint) != 0) return false;
+            if (placement == CoinPlacementMode.RealUserFolders)
+            {
+                // A PNG is considered ours only if its unique name AND every byte still match.
+                string expected = $"RANS0M-Lab-Coin-{coin.Token}-G{coin.Value}.png";
+                return string.Equals(Path.GetFileName(coin.File), expected, StringComparison.OrdinalIgnoreCase)
+                    && coin.Sha256.Length == 64
+                    && string.Equals(Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(coin.File))),
+                        coin.Sha256, StringComparison.OrdinalIgnoreCase);
+            }
+            if (!CoinValues.ExtensionValues.Any(kv => kv.Value == coin.Value
+                    && coin.File.EndsWith(".gold" + kv.Key, StringComparison.OrdinalIgnoreCase))) return false;
+            using var document = JsonDocument.Parse(File.ReadAllText(coin.File));
+            return document.RootElement.GetProperty("Session").GetString() == session
+                && document.RootElement.GetProperty("Token").GetString() == coin.Token
+                && document.RootElement.GetProperty("Value").GetInt32() == coin.Value;
+        }
+        catch { return false; }
+    }
+
+    private static bool Inside(string file, string root)
+    {
+        string relative = Path.GetRelativePath(root, file);
+        return relative != "." && relative != ".." && !relative.StartsWith(".." + Path.DirectorySeparatorChar)
+            && !Path.IsPathRooted(relative);
+    }
+
+    private static bool IsPermittedCoinPath(CoinRecord coin, string sessionRoot, CoinPlacementMode placement)
+    {
+        try
+        {
+            string path = Path.GetFullPath(coin.File);
+            if (placement == CoinPlacementMode.Simulation)
+                return Inside(path, Path.GetFullPath(sessionRoot)) && !HasReparseComponent(Path.GetDirectoryName(path)!);
+            // Real-folder mode does not descend into existing user subdirectories:
+            // the exact immediate parent must be one of the approved known folders.
+            string parent = Path.GetDirectoryName(path)!;
+            return ApprovedRealFolders().Any(dir => string.Equals(parent, dir, StringComparison.OrdinalIgnoreCase))
+                && !HasReparseComponent(parent);
+        }
+        catch { return false; }
+    }
+
+    private static List<string> ApprovedRealFolders()
+    {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var candidates = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
             Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            Path.Combine(home, "Downloads"),
             Environment.GetFolderPath(Environment.SpecialFolder.MyPictures),
             Environment.GetFolderPath(Environment.SpecialFolder.MyMusic),
-            Environment.GetFolderPath(Environment.SpecialFolder.MyVideos),
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")
+            Environment.GetFolderPath(Environment.SpecialFolder.MyVideos)
         };
-
-        public static string temporaryFolderPath = Path.Combine(Path.GetTempPath(), "RansomDrawers");
-
-        /// <summary>
-        /// Generate coins, chooses method based on config
-        /// </summary>
-        public static int GenerateCoins()
+        var cloudRoots = new[] { "OneDrive", "OneDriveConsumer", "OneDriveCommercial" }
+            .Select(Environment.GetEnvironmentVariable)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Path.GetFullPath(path!))
+            .ToArray();
+        var approved = new List<string>();
+        foreach (string candidate in candidates)
         {
-            return Config.UseDrawerMode ? GenerateFolderDrawerCoins() : GenerateScatteredCoins();
-        }
-
-        // ----------------- SCATTERED MODE -----------------
-
-        /// <summary>
-        /// Scatters coins randomly across user folders
-        /// </summary>
-        private static int GenerateScatteredCoins()
-        {
-            int targetGold = (int)(Config.RansomAmount * 1.2);
-            int generatedGold = 0;
-            List<string> createdPaths = new List<string>();
-            HashSet<string> touchedDirs = new HashSet<string>();
-
-            // Gold Coins
-            int maxAttempts = 500;
-            int attempts = 0;
-            while (generatedGold < targetGold && attempts < maxAttempts)
-            {
-                attempts++;
-                try
-                {
-                    string baseDir = targetFolders[Global.rng.Next(targetFolders.Count)];
-                    if (!Directory.Exists(baseDir)) continue;
-
-                    string targetDir = GetRandomLocationInTree(baseDir);
-                    Directory.CreateDirectory(targetDir);
-
-                    // Never track the base folders themselves for deletion, only their subfolders
-                    if (!targetFolders.Contains(targetDir, StringComparer.OrdinalIgnoreCase))
-                        touchedDirs.Add(targetDir);
-
-                    int extension = CoinValues.GetWeightedExtension(); // 1-5 only
-                    int coinValue = CoinValues.GetValue(extension);
-
-                    string coinFile = CreateCoinFile(targetDir, extension);
-                    if (coinFile != null)
-                    {
-                        createdPaths.Add(coinFile);
-                        generatedGold += coinValue;
-                    }
-                }
-                catch {}
-            }
-
-            // Honeypot
-            if (Global.rng.NextDouble() < Config.HoneypotChance/100.0)
-            {
-                try
-                {
-                    string baseDir = targetFolders[Global.rng.Next(targetFolders.Count)];
-                    if (Directory.Exists(baseDir))
-                    {
-                        string targetDir = GetRandomLocationInTree(baseDir);
-                        Directory.CreateDirectory(targetDir);
-                        if (!targetFolders.Contains(targetDir, StringComparer.OrdinalIgnoreCase))
-                            touchedDirs.Add(targetDir);
-
-                        string coinFile = CreateCoinFile(targetDir, 6);
-                        if (coinFile != null)
-                            createdPaths.Add(coinFile);
-                    }
-                }
-                catch { }
-            }
-
-            // Crucifix
-            if (Global.rng.NextDouble() < Config.CrucChance/100.0)
-            {
-                try
-                {
-                    string baseDir = targetFolders[Global.rng.Next(targetFolders.Count)];
-                    if (Directory.Exists(baseDir))
-                    {
-                        string targetDir = GetRandomLocationInTree(baseDir);
-                        Directory.CreateDirectory(targetDir);
-                        if (!targetFolders.Contains(targetDir, StringComparer.OrdinalIgnoreCase))
-                            touchedDirs.Add(targetDir);
-
-                        string crucifixFile = CreateCrucifixFile(targetDir);
-                        if (crucifixFile != null)
-                            createdPaths.Add(crucifixFile);
-                    }
-                }
-                catch { }
-            }
-
-            AppendToRegistry(createdPaths);
-            AppendDirsToRegistry(touchedDirs);
-            return generatedGold;
-        }
-
-        private static int GetBalancedMaxSubfolderDepth() => Math.Clamp(2 + Config.InfectionDuration / 45, 2, 8);
-
-        /// <returns>A random location in the folder tree, starting from the root</returns>
-        private static string GetRandomLocationInTree(string root)
-        {
-            List<string> chain = new List<string> { root };
-            int depth = Global.rng.Next(GetBalancedMaxSubfolderDepth() + 1);
-
-            string current = root;
-            for (int i = 0; i < depth; i++)
-            {
-                try
-                {
-                    string[] subDirs = Directory.GetDirectories(current);
-                    if (subDirs.Length == 0) break;
-                    current = subDirs[Global.rng.Next(subDirs.Length)];
-                    chain.Add(current);
-                }
-                catch { break; }
-            }
-
-            return chain[Global.rng.Next(chain.Count)];
-        }
-
-        // ---------------- FOLDER DRAWER MODE ----------------
-
-        private const double AverageCoinValue = 60;
-
-
-        private static (int drawerCount, int itemsPerDrawer) GetBalancedDrawerLayout()
-        {
-            int targetGold = (int)(Config.RansomAmount * 1.2);
-
-            int slotsForGold = (int)Math.Ceiling(targetGold / AverageCoinValue * 1.5);
-            int slotsForDuration = Config.InfectionDuration / 2;
-
-            int totalSlots = Math.Max(slotsForGold, slotsForDuration);
-
-            int itemsPerDrawer = Math.Clamp((int)Math.Round(Math.Sqrt(totalSlots)), 3, 8);
-            int drawerCount = Math.Max(1, (int)Math.Ceiling((double)totalSlots / itemsPerDrawer));
-
-            return (drawerCount, itemsPerDrawer);
-        }
-
-        private static string GenerateRandomFolderName() => Guid.NewGuid().ToString("N").Substring(0, 8);
-
-        /// <summary>
-        /// Creates a temporary folder structure
-        /// </summary>
-        private static int GenerateFolderDrawerCoins()
-        {
-            int targetGold = (int)(Config.RansomAmount * 1.2);
-            int generatedGold = 0;
-            List<string> createdPaths = new List<string>();
-            List<string> allDirs = new List<string>(); // Every drawer/item/subfolder dir made this pass
-
             try
             {
-                if (Directory.Exists(temporaryFolderPath))
-                    Directory.Delete(temporaryFolderPath, true);
+                if (string.IsNullOrWhiteSpace(candidate) || !Directory.Exists(candidate)) continue;
+                string dir = Path.GetFullPath(candidate);
+                if (!Inside(dir, Path.GetFullPath(home)) || HasReparseComponent(dir)) continue;
+                // Avoid copying lab coins into a synchronized personal cloud folder.
+                if (cloudRoots.Any(root => string.Equals(dir, root, StringComparison.OrdinalIgnoreCase) || Inside(dir, root))) continue;
+                if (!approved.Contains(dir, StringComparer.OrdinalIgnoreCase)) approved.Add(dir);
+            }
+            catch { /* This known folder is unavailable or protected. */ }
+        }
+        return approved;
+    }
 
-                Directory.CreateDirectory(temporaryFolderPath);
+    private static bool HasReparseComponent(string path)
+    {
+        try
+        {
+            DirectoryInfo? directory = new(Path.GetFullPath(path));
+            while (directory != null)
+            {
+                if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) return true;
+                directory = directory.Parent;
+            }
+            return false;
+        }
+        catch { return true; }
+    }
 
-                (int drawerCount, int itemsPerDrawer) = GetBalancedDrawerLayout();
+    public static void DeleteAllCoins()
+    {
+        lock (Gate)
+        {
+            if (WorkspaceRoot == null) return;
+            CleanSession(WorkspaceRoot);
+            Coins.Clear(); OwnedDirectories.Clear(); WorkspaceRoot = null; SessionId = null;
+        }
+    }
 
-                // Coins and drawers
-                for (int drawer = 0; drawer < drawerCount && generatedGold < targetGold; drawer++)
-                {
-                    string drawerPath = Path.Combine(temporaryFolderPath, GenerateRandomFolderName());
-                    Directory.CreateDirectory(drawerPath);
-                    allDirs.Add(drawerPath);
+    public static void RecoverOrphanedSessions()
+    {
+        try
+        {
+            if (!Directory.Exists(SessionParent)) return;
+            foreach (string dir in Directory.EnumerateDirectories(SessionParent)) CleanSession(dir);
+        }
+        catch { }
+    }
 
-                    for (int item = 0; item < itemsPerDrawer && generatedGold < targetGold; item++)
-                    {
-                        string itemPath = Path.Combine(drawerPath, GenerateRandomFolderName());
-                        Directory.CreateDirectory(itemPath);
+    private static void CleanSession(string dir)
+    {
+        try
+        {
+            if (!Inside(Path.GetFullPath(dir), Path.GetFullPath(SessionParent)) || HasReparseComponent(dir)
+                || !File.Exists(Path.Combine(dir, ".lab-owned"))) return;
+            string manifestFile = Path.Combine(dir, "manifest.json");
+            Manifest? manifest = File.Exists(manifestFile)
+                ? JsonSerializer.Deserialize<Manifest>(File.ReadAllText(manifestFile)) : null;
+            if (manifest?.Session != Path.GetFileName(dir)) return;
+            if (!Enum.TryParse(manifest.Placement, true, out CoinPlacementMode placement)) return;
 
-                        List<string> pathLevels = new List<string> { drawerPath, itemPath };
-
-                        // Randomly add more nesting (50% chance)
-                        if (Global.rng.Next(100) < 50)
-                        {
-                            string subfolderPath = Path.Combine(itemPath, GenerateRandomFolderName());
-                            Directory.CreateDirectory(subfolderPath);
-                            pathLevels.Add(subfolderPath);
-                        }
-
-                        allDirs.AddRange(pathLevels.Skip(1)); // drawerPath already added above
-
-                        string coinDir = pathLevels[Global.rng.Next(pathLevels.Count)];
-
-                        int extension = CoinValues.GetWeightedExtension();
-                        int coinValue = CoinValues.GetValue(extension);
-
-                        string coinFile = CreateCoinFile(coinDir, extension);
-                        if (coinFile != null)
-                        {
-                            createdPaths.Add(coinFile);
-                            generatedGold += coinValue;
-                        }
-                    }
-                }
-
-                // Honeypot
-                if (allDirs.Count > 0 && Global.rng.NextDouble() < Config.HoneypotChance / 100.0)
+            foreach (CoinRecord coin in manifest.Coins)
+            {
+                if (IsPermittedCoinPath(coin, dir, placement) && IsOurCoin(coin, manifest.Session, placement))
+                { try { File.Delete(coin.File); } catch { } }
+            }
+            // No folder from an actual user location can ever be removed.
+            if (placement == CoinPlacementMode.Simulation)
+            {
+                foreach (string child in manifest.Directories.OrderByDescending(x => x.Length))
                 {
                     try
                     {
-                        string dir = allDirs[Global.rng.Next(allDirs.Count)];
-                        string coinFile = CreateCoinFile(dir, 6);
-                        if (coinFile != null)
-                            createdPaths.Add(coinFile);
+                        if (!Inside(Path.GetFullPath(child), Path.GetFullPath(dir)) || HasReparseComponent(child)) continue;
+                        Directory.Delete(child, false); // fails safely if unknown files remain
                     }
                     catch { }
                 }
-
-                // Crucifix
-                if (allDirs.Count > 0 && Global.rng.NextDouble() < Config.CrucChance / 100.0)
-                {
-                    try
-                    {
-                        string dir = allDirs[Global.rng.Next(allDirs.Count)];
-                        string crucifixFile = CreateCrucifixFile(dir);
-                        if (crucifixFile != null)
-                            createdPaths.Add(crucifixFile);
-                    }
-                    catch { }
-                }
-
-                AppendToRegistry(createdPaths);
-
-                System.Diagnostics.Process.Start("explorer.exe", temporaryFolderPath);
             }
-            catch { }
-
-            return generatedGold;
+            // Keep metadata when anything remains, so recovery can retry on next run.
+            if (Directory.EnumerateDirectories(dir).Any()) return;
+            if (Directory.EnumerateFiles(dir).Any(f => f != manifestFile && f != Path.Combine(dir, ".lab-owned") && f != manifestFile + ".tmp"))
+                return;
+            // If any coin could not be removed, preserve the manifest (never forget it).
+            if (manifest.Coins.Any(c => File.Exists(c.File) && IsPermittedCoinPath(c, dir, placement))) return;
+            try { File.Delete(manifestFile + ".tmp"); } catch { }
+            File.Delete(manifestFile);
+            File.Delete(Path.Combine(dir, ".lab-owned"));
+            Directory.Delete(dir, false);
         }
-
-        /// <summary>
-        /// Closes any Explorer window showing the drawer folder
-        /// </summary>
-        private static void CloseDrawerExplorerWindow()
-        {
-            Thread thread = new Thread(() =>
-            {
-                try
-                {
-                    dynamic shell = Activator.CreateInstance(Type.GetTypeFromProgID("Shell.Application"));
-                    foreach (dynamic window in shell.Windows())
-                    {
-                        try
-                        {
-                            string url = window.LocationURL as string;
-                            if (string.IsNullOrEmpty(url)) continue;
-
-                            string path = Uri.UnescapeDataString(new Uri(url).LocalPath);
-                            if (path.StartsWith(temporaryFolderPath, StringComparison.OrdinalIgnoreCase))
-                                window.Quit();
-                        }
-                        catch { }
-                    }
-                }
-                catch { }
-            });
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
-            thread.Join(2000); // Don't let cleanup hang indefinitely if this ever misbehaves
-        }
-
-        // ------------------- COMMON HELPERS -------------------
-
-        /// <summary>
-        /// Creates a single encrypted coin file and returns its path
-        /// </summary>
-        private static string? CreateCoinFile(string directory, int extension)
-        {
-            try
-            {
-                // Create payload
-                Dictionary<string, string> payload = new Dictionary<string, string>
-                {
-                    { "RANSOM_COIN", Guid.NewGuid().ToString("N") }
-                };
-
-                string json = JsonSerializer.Serialize(payload);
-                byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
-
-                // Encrypt
-                byte[] encrypted = ProtectedData.Protect(jsonBytes, null, DataProtectionScope.CurrentUser);
-
-                // Generate file with random name and extension
-                string fileName = $"{Guid.NewGuid():N}.gold{extension}";
-                string fullPath = Path.Combine(directory, fileName);
-
-                File.WriteAllBytes(fullPath, encrypted);
-                return fullPath;
-            }
-            catch { return null; }
-        }
-
-        private static string? CreateCrucifixFile(string directory)
-        {
-            try
-            {
-                Dictionary<string, string> payload = new Dictionary<string, string>
-                {
-                    { "RANSOM_COIN", Guid.NewGuid().ToString("N") }
-                };
-
-                string json = JsonSerializer.Serialize(payload);
-                byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
-                byte[] encrypted = ProtectedData.Protect(jsonBytes, null, DataProtectionScope.CurrentUser);
-
-                string fileName = $"{Guid.NewGuid():N}.crucifix";
-                string fullPath = Path.Combine(directory, fileName);
-
-                File.WriteAllBytes(fullPath, encrypted);
-                return fullPath;
-            }
-            catch { return null; }
-        }
-
-        /// <summary>
-        /// Decrypts a coin file and returns its contents
-        /// </summary>
-        public static Dictionary<string, string>? DecryptCoinFile(string filePath)
-        {
-            try
-            {
-                byte[] encrypted = File.ReadAllBytes(filePath);
-                byte[] decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
-                string json = Encoding.UTF8.GetString(decrypted);
-                return JsonSerializer.Deserialize<Dictionary<string, string>>(json);
-            }
-            catch { return null; }
-        }
-
-        /// <summary>
-        /// Deletes all coins and cleans up
-        /// </summary>
-        public static void DeleteAllCoins()
-        {
-            List<string>? paths = GetRegistryFileList();
-            if (paths != null)
-            {
-                foreach (string path in paths)
-                {
-                    try { File.Delete(path); }
-                    catch { }
-                }
-            }
-
-            // Deepest path first
-            List<string>? dirs = GetRegistryDirList();
-            if (dirs != null)
-            {
-                foreach (string dir in dirs.OrderByDescending(d => d.Length))
-                {
-                    try { Directory.Delete(dir); }
-                    catch { }
-                }
-            }
-
-            // Close any Explorer window drawer mode opened for the temp folder before deleting it.
-            if (Config.UseDrawerMode)
-                CloseDrawerExplorerWindow();
-
-            // Clean up temporary folder if using drawer mode
-            try
-            {
-                if (Directory.Exists(temporaryFolderPath))
-                    Directory.Delete(temporaryFolderPath, true);
-            }
-            catch { }
-
-            // Clear registry
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
-                {
-                    key?.DeleteValue(RegistryValueName, false);
-                    key?.DeleteValue(DirRegistryValueName, false);
-                }
-            }
-            catch { }
-        }
-
-        // --------------- REGISTRY HELPERS ---------------
-
-        private static void AppendToRegistry(List<string> newPaths)
-        {
-            List<string> existing = GetRegistryFileList() ?? new List<string>();
-            existing.AddRange(newPaths);
-            SetRegistryFileList(existing);
-        }
-
-        private static List<string>? GetRegistryFileList()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RegistryPath))
-                {
-                    object? value = key?.GetValue(RegistryValueName);
-                    return value is string[] arr ? new List<string>(arr) : null;
-                }
-            }
-            catch { return null; }
-        }
-
-        private static void SetRegistryFileList(List<string> paths)
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
-                {
-                    key?.SetValue(RegistryValueName, paths.ToArray(), RegistryValueKind.MultiString);
-                }
-            }
-            catch { }
-        }
-
-        private static void AppendDirsToRegistry(IEnumerable<string> newDirs)
-        {
-            List<string> existing = GetRegistryDirList() ?? new List<string>();
-            existing.AddRange(newDirs);
-            SetRegistryDirList(existing);
-        }
-
-        private static List<string>? GetRegistryDirList()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RegistryPath))
-                {
-                    object? value = key?.GetValue(DirRegistryValueName);
-                    return value is string[] arr ? new List<string>(arr) : null;
-                }
-            }
-            catch { return null; }
-        }
-
-        private static void SetRegistryDirList(List<string> dirs)
-        {
-            try
-            {
-                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(RegistryPath))
-                {
-                    key?.SetValue(DirRegistryValueName, dirs.ToArray(), RegistryValueKind.MultiString);
-                }
-            }
-            catch { }
-        }
+        catch { }
     }
 }

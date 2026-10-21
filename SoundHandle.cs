@@ -1,71 +1,124 @@
 using NAudio.Wave;
 using System.IO;
 
-namespace rans0m
+namespace rans0m;
+
+/// <summary>
+/// Handles a WAV clip and its playback callback. PlaybackStopped may arrive later
+/// from another thread; it must never touch a reader already disposed by Finish().
+/// </summary>
+public sealed class SoundHandle
 {
-    // I'll make a better and good one laterrrr
-    public class SoundHandle
+    private readonly object _gate = new();
+    private readonly WaveOut _waveOut;
+    private readonly WaveFileReader _reader;
+    private bool _disposed;
+    private bool _looping;
+
+    private SoundHandle(WaveOut waveOut, WaveFileReader reader)
     {
-        private readonly WaveOut? _waveOut;
-        private readonly WaveFileReader? _reader;
-        private bool _disposed;
-        private bool _looping;
+        _waveOut = waveOut;
+        _reader = reader;
+        _waveOut.PlaybackStopped += OnPlaybackStopped;
+    }
 
-        public SoundHandle(WaveOut waveOut, WaveFileReader reader)
+    public static SoundHandle Create(Stream wavStream)
+    {
+        WaveFileReader? reader = null;
+        WaveOut? output = null;
+        try
         {
-            try
-            {
-                _waveOut = waveOut;
-                _reader = reader;
-                _waveOut.PlaybackStopped += OnPlaybackStopped;
-            }
-            catch { } // Probably NAudio device unavailable
+            reader = new WaveFileReader(wavStream);
+            output = new WaveOut();
+            output.Init(reader);
+            return new SoundHandle(output, reader);
         }
-
-        public static SoundHandle Create(Stream wavStream)
+        catch
         {
-            WaveFileReader reader = new WaveFileReader(wavStream);
-            WaveOut waveOut = new WaveOut();
-
-            waveOut.Init(reader);
-
-            return new SoundHandle(waveOut, reader);
+            try { output?.Dispose(); } catch { }
+            try { reader?.Dispose(); } catch { }
+            try { wavStream.Dispose(); } catch { }
+            throw;
         }
+    }
 
-        public void Play() => _waveOut?.Play();
-        public void Pause() => _waveOut?.Pause();
-        public void Reset() => _reader?.Position = 0;
-
-        public void PlayLooping()
+    public void Play()
+    {
+        lock (_gate)
         {
+            if (_disposed) return;
+            try { _waveOut.Play(); } catch (Exception ex) { LabDiagnostics.Write("Audio Play: " + ex); }
+        }
+    }
+
+    public void Pause()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            try { _waveOut.Pause(); } catch (Exception ex) { LabDiagnostics.Write("Audio Pause: " + ex); }
+        }
+    }
+
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
+            try { _reader.Position = 0; } catch (Exception ex) { LabDiagnostics.Write("Audio Reset: " + ex); }
+        }
+    }
+
+    public void PlayLooping()
+    {
+        lock (_gate)
+        {
+            if (_disposed) return;
             _looping = true;
-            _waveOut?.Play();
+            try { _waveOut.Play(); }
+            catch (Exception ex) { _looping = false; LabDiagnostics.Write("Audio Loop: " + ex); }
         }
+    }
 
-        private void OnPlaybackStopped(object s, StoppedEventArgs e)
+    private void OnPlaybackStopped(object? sender, StoppedEventArgs e)
+    {
+        // This handler can be queued BEFORE Stop() but delivered AFTER Dispose().
+        // _gate and _disposed prevent access to an already-disposed WaveFileReader.
+        try
         {
-            _reader?.Position = 0;
-            if (_looping && !_disposed)
+            lock (_gate)
             {
-                _waveOut?.Play();
-                return;
+                if (_disposed) return;
+                if (e.Exception != null)
+                {
+                    _looping = false;
+                    LabDiagnostics.Write("Audio playback failed: " + e.Exception);
+                    return;
+                }
+                _reader.Position = 0;
+                if (_looping) _waveOut.Play();
             }
-            //DisposeOnce();
         }
-
-        public void Stop()
+        catch (Exception ex)
         {
-            _looping = false;
-            try { _waveOut?.Stop(); } catch { }
-            DisposeOnce();
+            // Never let a background NAudio callback terminate the WPF process.
+            LabDiagnostics.Write("Audio callback: " + ex);
         }
+    }
 
-        private void DisposeOnce()
+    public void Stop()
+    {
+        // Disarm and unsubscribe BEFORE stopping/disposal: Stop() may emit
+        // PlaybackStopped asynchronously. In-flight handlers recheck _disposed.
+        lock (_gate)
         {
             if (_disposed) return;
             _disposed = true;
-            _waveOut?.Dispose();
-            _reader?.Dispose();
+            _looping = false;
+            _waveOut.PlaybackStopped -= OnPlaybackStopped;
         }
+        try { _waveOut.Stop(); } catch (Exception ex) { LabDiagnostics.Write("Audio Stop: " + ex); }
+        try { _waveOut.Dispose(); } catch (Exception ex) { LabDiagnostics.Write("Audio Dispose: " + ex); }
+        try { _reader.Dispose(); } catch (Exception ex) { LabDiagnostics.Write("Audio Reader Dispose: " + ex); }
     }
 }

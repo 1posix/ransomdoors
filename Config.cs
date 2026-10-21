@@ -1,186 +1,50 @@
-﻿using System.IO;
-using System.Reflection;
+using System.IO;
 using System.Text.Json;
 
-[AttributeUsage(AttributeTargets.Property)]
-public class ConfigField : Attribute
+namespace rans0m;
+
+internal enum CoinPlacementMode { Simulation, RealUserFolders }
+
+/// <summary>Read-only, constrained lab settings. No command execution or OS shutdown settings.</summary>
+internal static class Config
 {
-    public object DefaultValue { get; }
+    public static int InfectionDuration { get; private set; } = 90;
+    public static int RansomAmount { get; private set; } = 500;
+    public static bool ChangeWallpaper { get; private set; } = true;
+    // Never place files in real user folders unless explicitly opted in.
+    public static CoinPlacementMode CoinPlacement { get; private set; } = CoinPlacementMode.Simulation;
+    public static string EndMessage { get; private set; } =
+        "Vous avez laissé votre ordinateur déverrouillé. Vos fichiers ont été chiffrés et toutes vos données sont perdues.";
+    public static string SuccessMessage { get; private set; } =
+        "Bravo ! Vous avez récupéré assez de pièces pour sauver votre ordinateur.";
 
-    public ConfigField(object defaultValue)
+    private sealed class Settings
     {
-        DefaultValue = defaultValue;
-    }
-}
-
-public static class Config
-{
-    private static Dictionary<string, object> _cache = new();
-
-    private static string GetConfigPath()
-    {
-        return Path.Combine(AppContext.BaseDirectory, "ransomconfig.json");
-    }
-
-    public static bool ConfigExists()
-    {
-        return File.Exists(GetConfigPath());
+        public int DurationSeconds { get; set; } = 90;
+        public int TargetGold { get; set; } = 500;
+        public bool ChangeWallpaper { get; set; } = true;
+        public string CoinPlacement { get; set; } = "Simulation";
+        public string? FailureMessage { get; set; }
+        public string? SuccessMessage { get; set; }
     }
 
-    public static bool LoadConfig()
+    public static void Load()
     {
-        if (ConfigExists())
+        string path = Path.Combine(AppContext.BaseDirectory, "labsettings.json");
+        if (!File.Exists(path)) return;
+        try
         {
-            try
-            {
-                string json = File.ReadAllText(GetConfigPath());
-                _cache = JsonSerializer.Deserialize<Dictionary<string, object>>(json) ?? new();
-                return true;
-            }
-            catch { }
+            Settings? s = JsonSerializer.Deserialize<Settings>(File.ReadAllText(path),
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            if (s == null) return;
+            InfectionDuration = Math.Clamp(s.DurationSeconds, 15, 3600);
+            RansomAmount = Math.Clamp(s.TargetGold, 50, 5000);
+            ChangeWallpaper = s.ChangeWallpaper;
+            CoinPlacement = string.Equals(s.CoinPlacement, "RealUserFolders", StringComparison.OrdinalIgnoreCase)
+                ? CoinPlacementMode.RealUserFolders : CoinPlacementMode.Simulation;
+            if (!string.IsNullOrWhiteSpace(s.FailureMessage)) EndMessage = s.FailureMessage[..Math.Min(800, s.FailureMessage.Length)];
+            if (!string.IsNullOrWhiteSpace(s.SuccessMessage)) SuccessMessage = s.SuccessMessage[..Math.Min(800, s.SuccessMessage.Length)];
         }
-        return false;
-    }
-
-    private static T GetOrDefault<T>(string propertyName)
-    {
-        if (_cache.TryGetValue(propertyName, out object? value))
-        {
-            try
-            {
-                if (value is JsonElement element)
-                    return ConvertJsonElement<T>(element);
-
-                return (T)Convert.ChangeType(value, typeof(T));
-            }
-            catch { }
-        }
-
-        PropertyInfo prop = typeof(Config).GetProperty(propertyName, BindingFlags.Public | BindingFlags.Static);
-        ConfigField attr = prop?.GetCustomAttribute<ConfigField>();
-
-        if (attr != null)
-            return (T)Convert.ChangeType(attr.DefaultValue, typeof(T));
-
-        throw new KeyNotFoundException($"Config key '{propertyName}' not found");
-    }
-
-    // Dictionary<string,object> values deserialize as JsonElement, not the raw type
-    private static T ConvertJsonElement<T>(JsonElement element)
-    {
-        return element.Deserialize<T>();
-    }
-
-    public static void SaveConfig()
-    {
-        Dictionary<string, object> configToSave = new Dictionary<string, object>();
-
-        PropertyInfo[] properties = typeof(Config).GetProperties(
-            BindingFlags.Public | BindingFlags.Static);
-
-        foreach (PropertyInfo prop in properties)
-        {
-            ConfigField attr = prop.GetCustomAttribute<ConfigField>();
-            if (attr != null)
-            {
-                object value = _cache.ContainsKey(prop.Name) ? _cache[prop.Name] : attr.DefaultValue;
-                configToSave[prop.Name] = value;
-            }
-        }
-
-        string json = JsonSerializer.Serialize(configToSave, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(GetConfigPath(), json);
-        _cache = configToSave;
-    }
-
-
-    // Config properties with automatic setter
-    // ------------------- Behavior ----------------------
-    [ConfigField(true)]
-    public static bool SpawnAutomatically
-    {
-        get => GetOrDefault<bool>(nameof(SpawnAutomatically));
-        set { _cache[nameof(SpawnAutomatically)] = value; }
-    }
-
-    [ConfigField(false)]
-    public static bool a90Mode
-    {
-        get => GetOrDefault<bool>(nameof(a90Mode));
-        set { _cache[nameof(a90Mode)] = value; }
-    }
-
-    [ConfigField(5)]
-    public static int MinSpawnDelay
-    {
-        get => GetOrDefault<int>(nameof(MinSpawnDelay));
-        set { _cache[nameof(MinSpawnDelay)] = value; }
-    }
-
-    [ConfigField(600)]
-    public static int MaxSpawnDelay
-    {
-        get => GetOrDefault<int>(nameof(MaxSpawnDelay));
-        set { _cache[nameof(MaxSpawnDelay)] = value; }
-    }
-
-    [ConfigField(90)]
-    public static int InfectionDuration
-    {
-        get => GetOrDefault<int>(nameof(InfectionDuration));
-        set { _cache[nameof(InfectionDuration)] = value; }
-    }
-
-    // ------------------- Death -------------------
-
-    [ConfigField(false)]
-    public static bool CrashOnDeath
-    {
-        get => GetOrDefault<bool>(nameof(CrashOnDeath));
-        set { _cache[nameof(CrashOnDeath)] = value; }
-    }
-
-    [ConfigField(false)]
-    public static bool ExecCMDOnDeath
-    {
-        get => GetOrDefault<bool>(nameof(ExecCMDOnDeath));
-        set { _cache[nameof(ExecCMDOnDeath)] = value; }
-    }
-
-    [ConfigField("shutdown /s /t 0")]
-    public static string CMDOnDeath
-    {
-        get => GetOrDefault<string>(nameof(CMDOnDeath));
-        set { _cache[nameof(CMDOnDeath)] = value; }
-    }
-
-    // ------------------ Items -------------------
-
-    [ConfigField(false)]
-    public static bool UseDrawerMode
-    {
-        get => GetOrDefault<bool>(nameof(UseDrawerMode));
-        set { _cache[nameof(UseDrawerMode)] = value; }
-    }
-
-    [ConfigField(500)]
-    public static int RansomAmount // Gold needed to pay the ransom
-    {
-        get => GetOrDefault<int>(nameof(RansomAmount));
-        set { _cache[nameof(RansomAmount)] = value; }
-    }
-
-    [ConfigField(10)]
-    public static int CrucChance
-    {
-        get => GetOrDefault<int>(nameof(CrucChance));
-        set { _cache[nameof(CrucChance)] = value; }
-    }
-
-    [ConfigField(25)]
-    public static int HoneypotChance
-    {
-        get => GetOrDefault<int>(nameof(HoneypotChance));
-        set { _cache[nameof(HoneypotChance)] = value; }
+        catch { /* Invalid config: safely use built-in defaults. */ }
     }
 }

@@ -1,29 +1,43 @@
-﻿<Window x:Class="rans0m.RansomNotification"
+<Window x:Class="rans0m.RansomNotification"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
-        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:rans0m"
-        mc:Ignorable="d"
-        Title="RANS0M" Height="400" Width="560" Background="#FFF82B1C" ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True" AllowDrop="True" Loaded="Window_Loaded" DragEnter="Window_DragEnter" Drop="Window_Drop">
-    <Grid>
+        Title="RANS0M Lab — Simulation" Width="590" Height="465"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#1F080A"
+        Foreground="White" Topmost="True" ShowInTaskbar="True" AllowDrop="True"
+        Loaded="Window_Loaded" DragEnter="Window_DragEnter" Drop="Window_Drop"
+        Closing="Window_Closing">
+    <Grid Margin="20">
         <Grid.RowDefinitions>
-            <RowDefinition/>
-            <RowDefinition Height="0*"/>
-            <RowDefinition Height="0*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
-        <Image HorizontalAlignment="Left" Height="188" Margin="28,12,0,0" VerticalAlignment="Top" Width="188" Source="/Assets/ransom_idle.png"/>
-        <TextBlock HorizontalAlignment="Left" Margin="233,9,0,0" TextWrapping="Wrap" Text="YOUR FILES HAVE BEEN ENCRYPTED" VerticalAlignment="Top" Foreground="White" FontSize="44" FontFamily="Consolas" FontWeight="Bold" Width="267" Height="154" TextAlignment="Center"/>
-        <TextBlock HorizontalAlignment="Left" Margin="12,166,0,0" TextWrapping="Wrap" Text="" VerticalAlignment="Top" Foreground="White" FontSize="25" FontFamily="Consolas" Width="520" Height="109" TextAlignment="Center" Background="Black" Padding="0,10,0,0">
-            <Run Text="IF YOU DO NOT PAY THIS RANSOM BEFORE THE TIMER ENDS, YOUR FILES WILL BE " Foreground="White"/>
-            <Run Text="UNRECOVERABLE BY ANY MEANS." Foreground="Red"/>
-        </TextBlock>
-        <TextBlock x:Name="txt_timer" HorizontalAlignment="Left" Margin="218,286,0,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Text="TIME: 00:00" VerticalAlignment="Top" Foreground="Black" FontSize="46" FontFamily="Consolas" FontWeight="Bold" Width="314" Height="61" TextAlignment="Center" Background="Red"/>
-        <Border BorderBrush="#FFFFCF25" BorderThickness="2,2,2,2" HorizontalAlignment="Left" Height="62" Margin="12,286,0,0" VerticalAlignment="Top" Width="189" Background="Black"/>
-        <TextBlock x:Name="txt_ransomLeft" HorizontalAlignment="Left" Margin="20,288,0,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" Text="500" VerticalAlignment="Top" Foreground="#FFFFCF25" FontSize="48" FontFamily="Consolas" FontWeight="Bold" Width="171" Height="59"/>
-        <Image HorizontalAlignment="Left" Height="58" Margin="133,288,0,0" VerticalAlignment="Top" Width="59" Source="/Assets/Gold.png"/>
-        <Border BorderBrush="White" BorderThickness="2,2,2,2" HorizontalAlignment="Left" Height="109" Margin="12,166,0,0" VerticalAlignment="Top" Width="520"/>
-
-        <Border BorderBrush="White" BorderThickness="2,2,2,2" HorizontalAlignment="Left" Height="62" Margin="218,286,0,0" VerticalAlignment="Top" Width="314"/>
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
+            <Image Source="/Assets/ransom_idle.png" Width="112" Height="112"/>
+            <TextBlock Margin="18,0,0,0" Width="370" FontFamily="Consolas" FontWeight="Bold"
+                       TextWrapping="Wrap" FontSize="31" Foreground="#FF6969"
+                       Text="YOUR FILES HAVE BEEN ENCRYPTED" />
+        </StackPanel>
+        <TextBlock x:Name="txt_howto" Grid.Row="1" Margin="0,0,0,20" Padding="12" FontSize="17"
+                   Background="#4B0C11" TextWrapping="Wrap"
+                   Text="Find the gold coins in the simulated folders and pay before the countdown expires!"/>
+        <Grid Grid.Row="2" Margin="0,0,0,18">
+            <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                <Image Source="/Assets/Gold.png" Width="44" Height="44"/>
+                <TextBlock x:Name="txt_ransomLeft" Text="500" Foreground="#FFCD40" FontSize="37"
+                           FontWeight="Bold" FontFamily="Consolas" Margin="8,0,0,0"/>
+            </StackPanel>
+            <TextBlock x:Name="txt_timer" Grid.Column="1" Text="TIME: 01:30" FontSize="29"
+                       FontFamily="Consolas" Foreground="#FF6969" VerticalAlignment="Center"/>
+        </Grid>
+        <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,15">
+            <Button x:Name="btn_browse" Width="200" Height="40" Margin="0,0,14,0" Content="Chercher les pièces" Click="Browse_Click"/>
+            <Button Width="200" Height="40" Content="Quitter (sans risque)" Click="Quit_Click"/>
+        </StackPanel>
+        <TextBlock x:Name="txt_footer" Grid.Row="4" FontSize="12" Foreground="#FFD8C8" TextWrapping="Wrap"
+                   Text="EXERCICE DE SENSIBILISATION — Aucun fichier personnel n'est chiffré. Double-clique les pièces dans l'explorateur fictif, ou glisse les pièces depuis le dossier de simulation sur cette fenêtre. Ctrl+Maj+F12 pour arrêter."/>
     </Grid>
 </Window>

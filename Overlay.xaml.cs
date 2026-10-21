@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -6,612 +6,264 @@ using System.Windows.Forms;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Resources;
-using System.Windows.Threading;
 using WpfApplication = System.Windows.Application;
 
-namespace rans0m
+namespace rans0m;
+
+public partial class Overlay : Window
 {
-    public partial class Overlay : Window
+    private readonly Border[] _segments;
+    private NotifyIcon? _tray;
+    private CoinBrowser? _browser;
+    private RansomNotification? _notice;
+    private bool _finished;
+    public bool IsFinishing => _finished;
+
+    private SoundHandle? _spawn;
+    private SoundHandle? _attack;
+    private SoundHandle? _install;
+    private SoundHandle? _cash;
+    private SoundHandle? _layer1;
+    private SoundHandle? _layer2;
+    private SoundHandle? _layer3;
+    private int _musicLayer;
+
+    private HwndSource? _source;
+    private bool _hotkeyRegistered;
+    private const int HotkeyId = 0xA901;
+    private const int WmHotkey = 0x0312;
+
+    [DllImport("user32.dll")]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint modifiers, uint virtualKey);
+    [DllImport("user32.dll")]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hWnd, int index);
+    [DllImport("user32.dll")]
+    private static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+
+    public Overlay()
     {
-        private DispatcherTimer topMostTimer;
-        private KeyboardHook keyboardHook = new KeyboardHook();
-        private Border[] dpbSegments;
-        private NotifyIcon? trayIcon;
+        InitializeComponent();
+        Global.overlayWindow = this;
+        _segments = new[] { Seg0, Seg1, Seg2, Seg3, Seg4, Seg5, Seg6, Seg7, Seg8, Seg9 };
+        Closing += (_, _) => Cleanup();
+    }
 
-        private double _dpiScaleX = 1.0;
-        private double _dpiScaleY = 1.0;
+    private void MakeClickThrough()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        int style = GetWindowLong(hwnd, -20);
+        SetWindowLong(hwnd, -20, style | 0x00000020 | 0x00080000);
+    }
 
-        private SoundHandle spawnSound = SoundHandle.Create(Global.GetResourceSteam("Sounds/spawn.wav"));
-        private SoundHandle attackSound = SoundHandle.Create(Global.GetResourceSteam("Sounds/attack.wav"));
-        private SoundHandle installSound = SoundHandle.Create(Global.GetResourceSteam("Sounds/install.wav"));
-        private SoundHandle layer1 = SoundHandle.Create(Global.GetResourceSteam("Sounds/layer1.wav"));
-        private SoundHandle layer2 = SoundHandle.Create(Global.GetResourceSteam("Sounds/layer2.wav"));
-        private SoundHandle layer3 = SoundHandle.Create(Global.GetResourceSteam("Sounds/layer3.wav"));
+    private void SetupHotkey()
+    {
+        _source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
+        _source?.AddHook(WndProc);
+        // Ctrl+Shift+F12 always exits the simulation while it is running.
+        _hotkeyRegistered = RegisterHotKey(new WindowInteropHelper(this).Handle, HotkeyId, 0x0006, 0x7B);
+    }
 
-        public Overlay()
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WmHotkey && wParam.ToInt32() == HotkeyId)
         {
-            InitializeComponent();
-            Global.overlayWindow = this;
-            dpbSegments = new Border[] { Seg0, Seg1, Seg2, Seg3, Seg4, Seg5, Seg6, Seg7, Seg8, Seg9 };
-
-            topMostTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-
-            keyboardHook.KeyPressed += Global.KeyPressed;
-            keyboardHook.Hook();
-
-            this.Closing += (_, _) => CloseProperly();
-            AppDomain.CurrentDomain.ProcessExit += (_, _) => CloseProperly();
-            AppDomain.CurrentDomain.UnhandledException += (_, _) => CloseProperly();
-            Dispatcher.UnhandledException += (_, _) => CloseProperly();
-            Microsoft.Win32.SystemEvents.SessionEnding += (_, _) => CloseProperly();
+            handled = true;
+            WpfApplication.Current.Shutdown();
         }
+        return IntPtr.Zero;
+    }
 
-        private void CloseProperly()
+    private void SetupTray()
+    {
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("Quitter la simulation").Click += (_, _) => Dispatcher.Invoke(() => WpfApplication.Current.Shutdown());
+        _tray = new NotifyIcon
         {
-            trayIcon?.Visible = false;
-            FullCleanup();
-        }
+            Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? System.Drawing.SystemIcons.Application,
+            Text = "RANS0M Lab — Simulation",
+            ContextMenuStrip = menu,
+            Visible = true
+        };
+    }
 
-        private void UpdateDpiScale()
+    private static SoundHandle? Sound(string asset)
+    {
+        try { return SoundHandle.Create(Global.GetResourceSteam("Sounds/" + asset)); }
+        catch { return null; }
+    }
+
+    private async void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        MakeClickThrough();
+        SetupTray();
+        SetupHotkey();
+        _spawn = Sound("spawn.wav");
+        _attack = Sound("attack.wav");
+        _install = Sound("install.wav");
+        _cash = Sound("cash.wav");
+        _layer1 = Sound("layer1.wav");
+        _layer2 = Sound("layer2.wav");
+        _layer3 = Sound("layer3.wav");
+        ResetVisuals();
+        try { await StartGame(); }
+        catch (Exception ex)
         {
-            PresentationSource? source = PresentationSource.FromVisual(this);
-            if (source?.CompositionTarget is { } ct)
-            {
-                _dpiScaleX = ct.TransformToDevice.M11;
-                _dpiScaleY = ct.TransformToDevice.M22;
-            }
+            System.Windows.MessageBox.Show(ex.Message, "Erreur de simulation", MessageBoxButton.OK, MessageBoxImage.Error);
+            WpfApplication.Current.Shutdown();
         }
+    }
 
-        protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    private void ResetVisuals()
+    {
+        redVignette.Opacity = 0;
+        staticBg.Opacity = 0;
+        img_idle.Opacity = 0;
+        img_attack.Opacity = 0;
+        img_stopsign.Opacity = 0;
+        vb_download.Opacity = 0;
+        Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
+    }
+
+    private async Task StartGame()
+    {
+        // Read the bundled image on the UI thread and only pass its bytes to the worker.
+        // In RealUserFolders mode, coins are harmless PNG thumbnails, not executable shortcuts.
+        byte[]? coinImage = null;
+        if (Config.CoinPlacement == CoinPlacementMode.RealUserFolders)
         {
-            base.OnDpiChanged(oldDpi, newDpi);
-            _dpiScaleX = newDpi.DpiScaleX;
-            _dpiScaleY = newDpi.DpiScaleY;
+            using Stream source = Global.GetResourceSteam("Gold.png");
+            using var buffer = new MemoryStream();
+            source.CopyTo(buffer);
+            coinImage = buffer.ToArray();
         }
+        int generatedGold = await Task.Run(() => GoldCoinManager.GenerateCoins(coinImage));
+        if (generatedGold < 1) throw new InvalidOperationException("Impossible de créer les pièces fictives");
+        Global.ransomLeft = Math.Min(generatedGold, Config.RansomAmount);
+        Global.ransomTimeLeft = Config.InfectionDuration;
 
-        private async void Window_Loaded(object sender, RoutedEventArgs e)
+        await DownloadJumpscare();
+        if (_finished) return;
+        WallpaperUpdater.SetDarkRedWallpaper();
+        Global.underRansom = true;
+        _notice = new RansomNotification();
+        _notice.Show();
+        // RealUserFolders: let the participant discover PNG coins in Windows Explorer.
+        // Do not open the simulated index of every coin behind the ransom window.
+        if (Config.CoinPlacement == CoinPlacementMode.Simulation)
+            ShowBrowser();
+        _layer1?.PlayLooping();
+        _musicLayer = 1;
+    }
+
+    private async Task ShakeAsync(Thickness center)
+    {
+        for (int i = 0; i < 24 && !_finished; i++)
         {
-            await ResetRansom();
-            MakeClickThrough();
-            UpdateDpiScale();
-
-            WindowState = WindowState.Maximized;
-
-            // Register file types and set the app to it's ready state
-            FileTypeRegister.RegisterIconForExtension(".gold1", Global.GetBytesFromResource("Gold/Gold1.ico"), "GoldFile1");
-            FileTypeRegister.RegisterIconForExtension(".gold2", Global.GetBytesFromResource("Gold/Gold2.ico"), "GoldFile2");
-            FileTypeRegister.RegisterIconForExtension(".gold3", Global.GetBytesFromResource("Gold/Gold3.ico"), "GoldFile3");
-            FileTypeRegister.RegisterIconForExtension(".gold4", Global.GetBytesFromResource("Gold/Gold4.ico"), "GoldFile4");
-            FileTypeRegister.RegisterIconForExtension(".gold5", Global.GetBytesFromResource("Gold/Gold5.ico"), "GoldFile5");
-            FileTypeRegister.RegisterIconForExtension(".gold6", Global.GetBytesFromResource("Gold/HoneyPot.ico"), "GoldFile6");
-            FileTypeRegister.RegisterIconForExtension(".crucifix", Global.GetBytesFromResource("crucifix.ico"), "CrucifixFile");
-
-            await ResetRansom();
-            SetupTrayIcon();
-            SetupTopMostTimer();
-
-            if (!Config.LoadConfig())
-            {
-                new ConfigWindow().ShowDialog();
-            }
-
-            // Starts the RansomLoop (async void, yields back to the UI thread immediately)
-            RansomLoop();
+            img_attack.Margin = Global.CombineThickness(center,
+                new Thickness(Global.rng.Next(-18, 18), Global.rng.Next(-18, 18), 0, 0));
+            await Task.Delay(25);
         }
+    }
 
-        /// <summary>
-        /// Removes every trace RANS0M leaves on the system: gold coin files, the drawer temp folder,
-        /// the file types registrations and their icons, and the desktop wallpaper.
-        /// </summary>
-        private void FullCleanup()
+    private async Task DownloadJumpscare()
+    {
+        _spawn?.Play();
+        Global.CenterControl(img_idle);
+        img_idle.Opacity = 1;
+        await Task.Delay(500);
+        img_idle.Opacity = 0;
+        _attack?.Play();
+        Background = new SolidColorBrush(Color.FromRgb(100, 0, 0));
+        staticBg.Opacity = .08;
+        Global.CenterControl(img_attack);
+        Thickness center = img_attack.Margin;
+        img_attack.Opacity = 1;
+        await ShakeAsync(center);
+        img_attack.Opacity = 0;
+        _install?.Play();
+        vb_download.Opacity = 1;
+        foreach (var segment in _segments)
         {
-            GoldCoinManager.DeleteAllCoins();
-            FileTypeRegister.UnregisterAllGoldFileTypes();
-            WallpaperUpdater.RestoreWallpaper();
-            CursorUpdater.RestoreCursor();
+            if (_finished) return;
+            segment.Background = new SolidColorBrush(Color.FromRgb(200, 0, 0));
+            await Task.Delay(90);
         }
+        await Task.Delay(400);
+        ResetVisuals();
+    }
 
-        /// <summary>
-        /// TopMost alone doesn't stick, other windows (especially elevated ones) can still cover the overlay
-        /// so this keeps shoving it back to the front without stealing focus/keyboard input
-        /// </summary>
-        private void SetupTopMostTimer()
+    public void ShowBrowser()
+    {
+        // The integrated coin index is intentionally disabled for real-user folders.
+        // Prevent it from being reopened via another UI event in this mode.
+        if (_finished || Config.CoinPlacement == CoinPlacementMode.RealUserFolders) return;
+        if (_browser?.IsVisible == true) { _browser.Activate(); return; }
+        _browser = new CoinBrowser();
+        _browser.Show();
+    }
+
+    public void UpdateMusicForTime()
+    {
+        if (_finished) return;
+        int elapsed = Config.InfectionDuration - Global.ransomTimeLeft;
+        if (_musicLayer == 1 && elapsed >= Config.InfectionDuration / 2)
         {
-            topMostTimer.Tick += (s, e) =>
-            {
-                NativeMethods.SetWindowPos(new WindowInteropHelper(this).Handle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-                    NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-            };
-            topMostTimer.Start();
-
-            this.Closed += (s, e) => topMostTimer.Stop();
+            _layer1?.Pause(); _layer2?.PlayLooping(); _musicLayer = 2;
         }
-
-        /// <summary>
-        /// Setup the TrayIcon to close the app and open configuration menu
-        /// </summary>
-        private void SetupTrayIcon()
+        if (_musicLayer == 2 && elapsed >= Config.InfectionDuration * 3 / 4)
         {
-            ContextMenuStrip trayMenu = new ContextMenuStrip();
-
-            trayMenu.Items.Add("Configuration").Click += (s, e) => new ConfigWindow().Show();
-            trayMenu.Items.Add("Close").Click += (s, e) => WpfApplication.Current.Shutdown();
-
-            trayIcon = new NotifyIcon
-            {
-                Icon = System.Drawing.Icon.ExtractAssociatedIcon(Environment.ProcessPath) ?? System.Drawing.SystemIcons.Application,
-                ContextMenuStrip = trayMenu,
-                Text = "RANS0M",
-                Visible = true
-            };
+            _layer2?.Pause(); _layer3?.PlayLooping(); _musicLayer = 3;
         }
+    }
 
-        private static class NativeMethods
+    public void Redeem(string file)
+    {
+        if (_finished || !Global.underRansom) return;
+        if (!GoldCoinManager.TryRedeem(file, out int value)) return;
+        Global.ransomLeft = Math.Max(0, Global.ransomLeft - value);
+        _cash?.Reset(); _cash?.Play();
+        _notice?.UpdateCounters();
+        _browser?.RefreshCoins();
+        if (Global.ransomLeft == 0) Finish(true);
+    }
+
+    public void Finish(bool success)
+    {
+        if (_finished) return;
+        _finished = true;
+        LabDiagnostics.Write($"Finishing game (success={success})");
+        Global.underRansom = false;
+        Cleanup();
+        _notice?.Close();
+        _browser?.Close();
+        _notice = null;
+        _browser = null;
+        var end = new EndScreen(success);
+        // The old overlay stays hidden until the person closes this result window.
+        // Explicitly hand over MainWindow so closing game windows cannot dismiss the result.
+        WpfApplication.Current.MainWindow = end;
+        end.Show();
+        LabDiagnostics.Write("Result window shown");
+        Hide();
+        // Bring the result into the foreground only once; normal mouse movements
+        // and focus changes must never hide, close or replace it.
+        end.Activate();
+    }
+
+    private void Cleanup()
+    {
+        // Idempotent: called on success, failure, closing, and application exit.
+        _layer1?.Stop(); _layer2?.Stop(); _layer3?.Stop();
+        _spawn?.Stop(); _attack?.Stop(); _install?.Stop(); _cash?.Stop();
+        WallpaperUpdater.RestoreWallpaper();
+        GoldCoinManager.DeleteAllCoins();
+        if (_source != null)
         {
-            public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
-            public const uint SWP_NOMOVE = 0x0002;
-            public const uint SWP_NOSIZE = 0x0001;
-            public const uint SWP_NOACTIVATE = 0x0010;
-
-            [DllImport("user32.dll")]
-            public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+            if (_hotkeyRegistered) UnregisterHotKey(new WindowInteropHelper(this).Handle, HotkeyId);
+            _source.RemoveHook(WndProc); _source = null;
         }
-
-        [DllImport("user32.dll")]
-        private static extern int GetWindowLong(IntPtr hwnd, int index);
-
-        [DllImport("user32.dll")]
-        private static extern int SetWindowLong(IntPtr hwnd, int index, int newStyle);
-
-        private void MakeClickThrough()
-        {
-            IntPtr hwnd = new WindowInteropHelper(this).Handle;
-            int extendedStyle = GetWindowLong(hwnd, -20);
-            SetWindowLong(hwnd, -20, extendedStyle |
-                0x00000020 | // WS_EX_TRANSPARENT
-                0x00080000 // WS_EX_LAYERED
-                );
-        }
-
-
-
-
-
-
-
-
-
-
-        // -------------------- CORE --------------------
-
-        /// <summary>
-        /// Reset the app to it's ready state
-        /// </summary>
-        public async Task ResetRansom()
-        {
-            await Task.Run(() => GoldCoinManager.DeleteAllCoins());
-
-            Global.canAttack = true;
-            Global.RansomPayed = null;
-            Global.underRansom = false;
-            Global.ransomLeft = 0;
-            Global.usedCoins.Clear();
-            Global.crucifixUsed = false;
-
-            foreach (TauntWindow tauntWindow in WpfApplication.Current.Windows.OfType<TauntWindow>().ToList())
-            {
-                tauntWindow.Close();
-            }
-
-            redVignette.Opacity = 0;
-            staticBg.Opacity = 0;
-
-            img_idle.Opacity = 0;
-            img_attack.Opacity = 0;
-            img_stopsign.Opacity = 0;
-            vb_download.Opacity = 0;
-            vb_download.Width = 668;
-            vb_download.Height = 88;
-            foreach (Border seg in dpbSegments)
-            {
-                seg.Background = new SolidColorBrush(Color.FromRgb(0, 0, 0));
-            }
-
-            Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
-            WallpaperUpdater.RestoreWallpaper();
-            CursorUpdater.RestoreCursor();
-        }
-
-        /// <summary>
-        /// Shakes img_attack around its center position for the given number of ticks (20ms apart)
-        /// </summary>
-        private async Task ShakeAsync(Thickness center, int ticks)
-        {
-            for (int i = 0; i <= ticks; i++)
-            {
-                await Task.Delay(20);
-                try { img_attack.Margin = Global.CombineThickness(center, new Thickness(Global.rng.Next(-40, 40), Global.rng.Next(-40, 40), 0, 0)); }
-                catch { break; }
-            }
-        }
-
-        /// <summary>
-        /// Ransom loop, keeps summoning ransom randomly
-        /// </summary>
-        private async void RansomLoop()
-        {
-            while (true)
-            {
-                if (!Config.SpawnAutomatically)
-                {
-                    await InterruptibleDelay(250);
-                    continue;
-                }
-
-                int minDelay = Math.Min(Config.MinSpawnDelay, Config.MaxSpawnDelay) * 1000;
-                int maxDelay = Math.Max(Config.MinSpawnDelay, Config.MaxSpawnDelay) * 1000;
-                await InterruptibleDelay(Global.rng.Next(minDelay, maxDelay)); // Ransom Debounce
-
-                try { await this.Dispatcher.Invoke(SpawnRansom); }
-                catch { break; }
-            }
-        }
-
-        private CancellationTokenSource? _spawnDelayCts;
-
-        /// <summary>
-        /// Cuts the current wait short so a config change applies right away.
-        /// </summary>
-        public void RetriggerSpawnLoop() => _spawnDelayCts?.Cancel();
-
-        private async Task InterruptibleDelay(int ms)
-        {
-            // Fresh CTS each call so an old Cancel() can't carry over into a later delay
-            _spawnDelayCts?.Dispose();
-            _spawnDelayCts = new CancellationTokenSource();
-            try { await Task.Delay(ms, _spawnDelayCts.Token); }
-            catch { }
-        }
-
-        /// <summary>
-        /// Summons Ransom, triggers each step of the ransom process
-        /// </summary>
-        public async Task SpawnRansom()
-        {
-            if (!Global.canAttack) return;
-            Global.canAttack = false;
-
-            bool mouseMoved = await RansomWarning();
-            if (mouseMoved) // User moved the mouse
-            {
-                if (Config.a90Mode) { 
-                    await CrashJumpscare(); 
-                    return; 
-                }
-
-                int generatedGold = 0;
-                try { generatedGold = await Task.Run(() => GoldCoinManager.GenerateCoins()); }
-                catch { }
-
-                try
-                {
-                    if (generatedGold <= 0) // hopefully doesn't happen
-                    {
-                        await CrashJumpscare();
-                    }
-                    else
-                    {
-                        await DownloadJumpscare();
-
-                        if (await Ransomed(generatedGold)) // If user didn't pay the ransom in time
-                        {
-                            Global.underRansom = false;
-                            await CrashJumpscare();
-                        }
-                    }
-                }
-                catch
-                {
-                    await ResetRansom();
-                }
-            }
-            else await ResetRansom(); // User didn't move the mouse, dodged the ransom
-        }
-
-
-
-
-
-
-
-
-
-        // ------------------- RANSOM PHASES -------------------
-
-        /// <summary>
-        /// First phase of Ransom
-        /// </summary>
-        /// <returns>true if the mouse moved during the warning phase</returns>
-        public async Task<bool> RansomWarning()
-        {
-            spawnSound.Play();
-
-            // Shows Ransom's face randomly on the screen
-            Global.RandomPosControl(img_idle);
-            img_idle.Opacity = 100;
-
-            await Task.Delay(500); // Mouse spy phase
-
-            Global.lastRegisteredMousePos = System.Windows.Forms.Cursor.Position;
-            Global.spyingMouse = true;
-
-            // Center Ransom's face and show the warning sign
-            img_stopsign.Opacity = 100;
-            Global.CenterControl(img_idle);
-            img_idle.Margin = new Thickness(img_idle.Margin.Left, img_idle.Margin.Top + 50, 0, 0);
-            Background = new SolidColorBrush(Color.FromRgb(40, 0, 0));
-
-            await Task.Delay(500); // End of spy phase
-
-            Global.spyingMouse = false;
-            bool mouseMoved = System.Windows.Forms.Cursor.Position != Global.lastRegisteredMousePos;
-
-            // Hide the warning sign, show Ransom face's on the center with a red background
-            img_stopsign.Opacity = 0;
-            Background = new SolidColorBrush(Color.FromArgb(100, 100, 0, 0));
-
-            int waitTime = mouseMoved ? 25 : 100;
-            await Task.Delay(waitTime);
-            Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
-            img_idle.Opacity = 0;
-
-            return mouseMoved;
-        }
-
-        /// <summary>
-        /// Second phase of Ransom, Jumpscare+Downloading effect
-        /// </summary>
-        public async Task DownloadJumpscare()
-        {
-            attackSound.Play();
-
-            Global.CenterControl(img_attack);
-            Thickness imgAttackCenter = img_attack.Margin; // Store the center position of the attack image for the shake effect
-            img_attack.Opacity = 100;
-            Background = new SolidColorBrush(Color.FromRgb(120, 0, 0));
-            staticBg.Opacity = 0.05;
-
-            // Ransom Face Shake Effect
-            _ = ShakeAsync(imgAttackCenter, 40);
-
-            await Task.Delay(800);
-
-            // Downloading screen
-            img_attack.Opacity = 0;
-
-            installSound.Play();
-
-            vb_download.Opacity = 100;
-
-            LinearGradientBrush gradientBrush = new LinearGradientBrush
-            {
-                StartPoint = new Point(0.5, 0),
-                EndPoint = new Point(0.5, 1)
-            };
-
-            gradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(255, 204, 0, 0), 0));
-            gradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(255, 150, 0, 0), 0.5));
-            gradientBrush.GradientStops.Add(new GradientStop(Color.FromArgb(255, 204, 0, 0), 1));
-
-            bool effect = true;
-            _ = Dispatcher.BeginInvoke(async () =>
-            {
-                while (effect)
-                {
-                    txt_download.Content = "DOWNLOADING";
-                    txt_download.Foreground = new SolidColorBrush(Color.FromRgb(255, 255, 255));
-                    await Task.Delay(120);
-                    txt_download.Content = "DOWNLOADING.";
-                    await Task.Delay(120);
-                    txt_download.Content = "DOWNLOADING..";
-                    await Task.Delay(120);
-                    txt_download.Content = "DOWNLOADING...";
-                    await Task.Delay(120);
-                    txt_download.Content = "DOWNLOADING";
-                    txt_download.Foreground = new SolidColorBrush(Color.FromRgb(255, 0, 0));
-                    await Task.Delay(120);
-                }
-
-            });
-
-            _ = Dispatcher.BeginInvoke(async () =>
-            {
-                foreach (Border seg in dpbSegments)
-                {
-                    await Task.Delay(120);
-                    vb_download.Width = vb_download.Width + 20;
-                    vb_download.Height = vb_download.Height + 20;
-                    seg.Background = gradientBrush;
-                }
-            });
-
-
-            // Text and download bar shake/glitch effect
-            new Thread(() =>
-            {
-                for (int i = 0; i <= 40; i++)
-                {
-                    Thread.Sleep(40);
-                    try
-                    {
-                        this.Dispatcher.Invoke(() =>
-                        {
-                            txt_download.Margin = new Thickness(Global.rng.Next(-5, 5), Global.rng.Next(-5, 5), 0, 0);
-                            downloadProgressBar.Margin = new Thickness(Global.rng.Next(-20, 20), Global.rng.Next(-20, 20), 0, 0);
-                        });
-                    }
-                    catch { break; }
-                }
-            })
-            { IsBackground = true }.Start();
-
-            await Task.Delay(1200);
-            effect = false;
-
-            Background = new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
-            img_attack.Opacity = 0;
-            vb_download.Opacity = 0;
-            foreach (Border seg in dpbSegments) seg.Background = new SolidColorBrush(Color.FromRgb(0, 0, 0));
-            staticBg.Opacity = 0;
-        }
-
-        /// <summary>
-        /// Third phase of Ransom, the actual ransom, plays the music, shows the Ransomed window, etc...
-        /// </summary>
-        /// <param name="generatedGold">Total value of the coins actually generated on disk for this run</param>
-        public async Task<bool> Ransomed(int generatedGold)
-        {
-            WallpaperUpdater.SetDarkRedWallpaper();
-            CursorUpdater.SetInfectedCursor();
-
-            // Red Flash
-            SolidColorBrush brush = new SolidColorBrush(Color.FromArgb(255, 255, 0, 0));
-            Background = brush;
-
-            ColorAnimation animation = new ColorAnimation
-            {
-                From = Color.FromArgb(255, 255, 0, 0),
-                To = Color.FromArgb(0, 255, 0, 0),
-                Duration = TimeSpan.FromMilliseconds(500)
-            };
-
-            brush.BeginAnimation(SolidColorBrush.ColorProperty, animation);
-
-            redVignette.Opacity = 100;
-
-            // Clamp so an unlucky generation run can never leave the ransom unpayable
-            Global.ransomLeft = Math.Min(Config.RansomAmount, generatedGold);
-            Global.underRansom = true;
-
-            // Lets payment wake the wait below immediately instead of only at the next layer boundary
-            TaskCompletionSource<bool> paidSignal = new TaskCompletionSource<bool>();
-            Global.RansomPayed = () => // Ransom payed event
-            {
-                layer1.Pause();
-                layer2.Pause();
-                layer3.Pause();
-
-                this.Dispatcher.Invoke(() => ResetRansom());
-                paidSignal.TrySetResult(true);
-            };
-
-            // Shows the main ransom window
-            RansomNotification? ransomNotification = null;
-
-            _ = Dispatcher.BeginInvoke(() =>
-            {
-                ransomNotification = new RansomNotification();
-                ransomNotification.Show();
-            }, DispatcherPriority.Normal);
-
-            int layer3Seconds = 26;
-            int remainingSeconds = Math.Max(0, Config.InfectionDuration - layer3Seconds);
-            int layer1Seconds = remainingSeconds / 2;
-            int layer2Seconds = remainingSeconds - layer1Seconds;
-
-            Global.ransomTimeLeft = Config.InfectionDuration;
-
-            layer1.Reset();
-            layer2.Reset();
-            layer3.Reset();
-
-            layer1.PlayLooping();
-            bool startedLayer2 = false;
-            bool startedLayer3 = false;
-
-            int elapsed = 0;
-            while (elapsed < Config.InfectionDuration)
-            {
-                // Ticking every second keeps ransomTimeLeft accurate, still wakes early on payment
-                if (await Task.WhenAny(Task.Delay(1000), paidSignal.Task) == paidSignal.Task) return false;
-                if (!Global.underRansom) return false;
-
-                elapsed++;
-                Global.ransomTimeLeft = Math.Max(0, Config.InfectionDuration - elapsed);
-
-                if (!startedLayer2 && elapsed >= layer1Seconds)
-                {
-                    startedLayer2 = true;
-                    layer1.Pause();
-                    layer2.PlayLooping();
-                }
-                else if (startedLayer2 && !startedLayer3 && elapsed >= layer1Seconds + layer2Seconds)
-                {
-                    startedLayer3 = true;
-                    layer2.Pause();
-                    layer3.Play();
-                }
-            }
-
-            // If the code reaches here, this means the user didn't pay the ransom in time 
-            if (ransomNotification != null)
-            {
-                ransomNotification.Close();
-            }
-
-            redVignette.Opacity = 0;
-            return true;
-        }
-
-        /// <summary>
-        /// Shows the jumpscare and shutdowns/exec a command depending on the config
-        /// </summary>
-        public async Task CrashJumpscare()
-        {
-            attackSound.Play();
-
-            Background = new SolidColorBrush(Color.FromRgb(100, 0, 0));
-            staticBg.Opacity = 0.05;
-
-            Global.CenterControl(img_attack);
-            Thickness imgAttackCenter = img_attack.Margin; // Store the center position of the attack image for the shake effect
-            img_attack.Opacity = 100;
-            // Ransom Face Shake Effect
-            _ = ShakeAsync(imgAttackCenter, 25);
-
-            await Task.Delay(1000);
-
-            if (Config.ExecCMDOnDeath)
-            {
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = "/c " + Config.CMDOnDeath,
-                    UseShellExecute = true,
-                    CreateNoWindow = true,
-                    ErrorDialog = true
-                };
-
-                Process.Start(psi);
-            }
-
-            if (Config.CrashOnDeath)
-            {
-                ProcessStartInfo psi = new ProcessStartInfo
-                {
-                    FileName = "cmd.exe",
-                    Arguments = "/c shutdown /s /t 0",
-                    UseShellExecute = true,
-                    CreateNoWindow = true,
-                    ErrorDialog = true
-                };
-
-                Process.Start(psi);
-            }
-
-            await ResetRansom();
-        }
-
+        _tray?.Dispose(); _tray = null;
     }
 }

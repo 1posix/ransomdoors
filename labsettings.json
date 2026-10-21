@@ -1,0 +1,8 @@
+{
+  "DurationSeconds": 90,
+  "TargetGold": 500,
+  "ChangeWallpaper": true,
+  "CoinPlacement": "Simulation",
+  "FailureMessage": "Vous avez laissé votre ordinateur déverrouillé. Vos fichiers ont été chiffrés et toutes vos données sont perdues.",
+  "SuccessMessage": "Bravo ! Vous avez récupéré les pièces dans le temps imparti et sauvé votre ordinateur."
+}

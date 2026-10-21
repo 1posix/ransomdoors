@@ -1,132 +1,63 @@
-﻿using System.IO;
+using System.IO;
 using System.Windows;
 using System.Windows.Threading;
+using WpfApplication = System.Windows.Application;
 
-namespace rans0m
+namespace rans0m;
+
+public partial class RansomNotification : Window
 {
-    public partial class RansomNotification : Window
+    private readonly DispatcherTimer _timer = new() { Interval = TimeSpan.FromSeconds(1) };
+    public RansomNotification()
     {
-        private DispatcherTimer _timer;
-
-        public RansomNotification()
+        InitializeComponent();
+        if (Config.CoinPlacement == CoinPlacementMode.RealUserFolders)
         {
-            InitializeComponent();
-
-            _timer = new DispatcherTimer
-            {
-                Interval = TimeSpan.FromSeconds(1)
-            };
-            _timer.Tick += Timer_Tick;
-            _timer.Start();
-
-            Closed += (_, _) => _timer.Stop();
+            // Let the participant search the real Desktop/Documents/etc. themselves.
+            // No in-app coin index is displayed or made available in this mode.
+            btn_browse.Visibility = Visibility.Collapsed;
+            txt_howto.Text = "Cherche les pièces d'or dans ton Bureau, Documents, Téléchargements, Images, Musique et Vidéos, puis glisse-les ici pour payer avant la fin du temps !";
+            txt_footer.Text = "EXERCICE DE SENSIBILISATION — Aucun fichier personnel n'est chiffré. Explore les dossiers Windows et glisse les pièces PNG sur cette fenêtre. Ctrl+Maj+F12 pour arrêter.";
         }
-
-        private void Window_Loaded(object sender, RoutedEventArgs e)
+        _timer.Tick += (_, _) =>
         {
-            Global.HideSystemMenu(this);
+            if (!Global.underRansom) { _timer.Stop(); return; }
+            Global.ransomTimeLeft = Math.Max(0, Global.ransomTimeLeft - 1);
+            UpdateCounters();
+            Global.overlayWindow?.UpdateMusicForTime();
+            if (Global.ransomTimeLeft <= 0) Global.overlayWindow?.Finish(false);
+        };
+        Closed += (_, _) => _timer.Stop();
+    }
 
-            // Init the window
-            txt_timer.Text = $"TIME: {Global.ransomTimeLeft / 60:D2}:{Global.ransomTimeLeft % 60:D2}";
-            Global.RandomPosWindow(this);
+    private void Window_Loaded(object sender, RoutedEventArgs e)
+    {
+        UpdateCounters();
+        _timer.Start();
+    }
 
-            // Init 9 taunt windows
-            for (int i = 0; i < 9; i++)
-            {
-                TauntWindow tauntWindow = new TauntWindow();
-                tauntWindow.Show();
-            }
+    public void UpdateCounters()
+    {
+        txt_ransomLeft.Text = Global.ransomLeft.ToString();
+        txt_timer.Text = $"TIME: {Global.ransomTimeLeft / 60:D2}:{Global.ransomTimeLeft % 60:D2}";
+    }
 
-            Global.GlitchIdle(this, true);
-        }
-
-        private void Timer_Tick(object sender, EventArgs e)
-        {
-            txt_ransomLeft.Text = Global.ransomLeft.ToString();
-            txt_timer.Text = $"TIME: {Global.ransomTimeLeft / 60:D2}:{Global.ransomTimeLeft % 60:D2}";
-        }
-
-        private void Window_DragEnter(object sender, DragEventArgs e)
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                // TODO : Check if file is a valid .gold file
-                e.Effects = DragDropEffects.Link;
-            }
-        }
-
-        private void Window_Drop(object sender, DragEventArgs e)
-        {
-            string[] files = (string[])e.Data.GetData(DataFormats.FileDrop);
-
-            bool sfxPlayed = false; // Prevent multiple sfx to play when user drags multiple coins
-            foreach (string file in files) // technically it's easily cheat but who cares
-            {
-                string extension = Path.GetExtension(file);
-
-                if (extension.StartsWith(".gold"))
-                {
-                    try
-                    {
-                        int goldType = Int32.Parse(extension.Replace(".gold", ""));
-                        Dictionary<string, string> goldFileData = GoldCoinManager.DecryptCoinFile(file);
-
-                        if (goldFileData == null || !goldFileData.TryGetValue("RANSOM_COIN", out string coinId))
-                            continue; // Corrupt/foreign file
-
-                        if (!Global.usedCoins.Contains(coinId)) // If coin hasn't been used yet (to prevent peoples from just copy pasting coins
-                        {
-                            if (!sfxPlayed)
-                            {
-                                // Use the coin
-                                SoundHandle cashSfx = SoundHandle.Create(Global.GetResourceSteam("Sounds/cash.wav")); // Need to replace the sfx it's kinda trash
-                                cashSfx.Play();
-                                sfxPlayed = true;
-                            }
-
-                            Global.usedCoins.Add(coinId);
-                            Global.ransomLeft -= CoinValues.ExtensionValues[goldType];
-
-                            File.Delete(file);
-                        }
-                    }
-                    catch { }
-
-                }
-                else if (extension == ".crucifix")
-                {
-                    try
-                    {
-                        Dictionary<string, string> crucifixData = GoldCoinManager.DecryptCoinFile(file);
-
-                        if (crucifixData == null || !crucifixData.TryGetValue("RANSOM_COIN", out string coinId))
-                            continue; // Corrupt/foreign file
-
-                        if (!Global.usedCoins.Contains(coinId))
-                        {
-                            Global.usedCoins.Add(coinId);
-                            File.Delete(file);
-
-                            Global.crucifixUsed = true;
-                            Global.ransomLeft = 0;
-                        }
-                    }
-                    catch { }
-                }
-            }
-
-            if (Global.ransomLeft <= 0)
-            {
-                Global.underRansom = false;
-
-                if (Global.crucifixUsed)
-                    new CrucifixWindow(this.Left, this.Top).Show();
-                else
-                    new ThankYou(this.Left, this.Top).Show();
-
-                Close();
-            }
-
-        }
+    private void Browse_Click(object sender, RoutedEventArgs e) => Global.overlayWindow?.ShowBrowser();
+    private void Quit_Click(object sender, RoutedEventArgs e) => WpfApplication.Current.Shutdown();
+    private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (Global.underRansom && Global.overlayWindow?.IsFinishing != true)
+            WpfApplication.Current.Shutdown();
+    }
+    private void Window_DragEnter(object sender, DragEventArgs e)
+    {
+        e.Effects = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
+        e.Handled = true;
+    }
+    private void Window_Drop(object sender, DragEventArgs e)
+    {
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] files) return;
+        foreach (string file in files) Global.overlayWindow?.Redeem(file);
     }
 }
