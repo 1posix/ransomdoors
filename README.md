@@ -75,27 +75,47 @@ L’écran final **reste affiché jusqu’au clic sur « Terminer et quitter »*
 
 ### Limitations connues
 
-- **Pas de build Windows exécuté ici** : l'archive est une version source modifiée, à compiler et tester sur Windows. Un SDK Windows / runtime GUI n'est pas disponible dans l'environnement qui a produit ce patch.
+- **Validation :** la v4 a été compilée et testée avec succès sur une VM Windows 10. La publication autonome win-x64 a également été préparée et testée en laboratoire.
 - En mode simulation, les pièces restent dans un explorateur WPF dédié. En mode réel, les PNG apparaissent dans le Bureau et les autres dossiers autorisés, et l’encaissement s’effectue **par glisser-déposer depuis l’Explorateur Windows** ; le double-clic dans l’Explorateur Windows ne sert qu’à ouvrir l’image.
 - La restauration utilise le chemin du fond d'écran Windows. Certains modes avancés (diaporama, fonds différents sur chaque moniteur, fonds dynamiques) peuvent nécessiter un contrôle manuel après la simulation.
 - Après une coupure brutale, les fichiers non reconnus ou modifiés intentionnellement restent en place plutôt que d'être supprimés aveuglément.
 - Une application ne peut pas être absolument invisible aux outils Windows (Gestionnaire des tâches) : elle ne cherche pas à masquer le processus.
 
-## Git (plus tard)
+## Dépôt GitHub et historique
 
-L'archive est volontairement distribuée **sans `.git`**. Pour créer le dépôt avec votre identité Git locale :
+Ce projet est un fork de [Ixars/ransomdoors](https://github.com/Ixars/ransomdoors).
 
-```bash
-git init
-git config --local user.name "VOTRE_PSEUDO"
-git config --local user.email "VOTRE_EMAIL"
-git add .
-git commit -m "feat: harmless RANS0M awareness lab"
-```
+- **Fork :** https://github.com/1posix/ransomdoors
+- **Branche principale :** `awareness-lab`
+- **Branche `main` :** version originale conservée
+- **Licence :** consulter `LICENSE.md`
 
-Pour `gh repo create` et le push, on procèdera ensuite, à partir du poste de développement et de vos identifiants réels.
+Les modifications de sensibilisation sont documentées dans
+`CHANGELOG-LAB.md`.
 
-### Diagnostic si la fenêtre de résultat disparaît (v4)
+## Télécharger la version Windows
+
+La version `v1.0.0-lab` est distribuée sous forme d'une archive
+Windows x64 contenant l'exécutable autonome et sa configuration.
+
+[Télécharger depuis GitHub Releases](https://github.com/1posix/ransomdoors/releases)
+
+1. Extraire l'archive dans un dossier local.
+2. Modifier `labsettings.json` si nécessaire.
+3. Lancer `rans0m.exe` sur une VM Windows de laboratoire.
+4. Attendre trois secondes d'inactivité, puis interagir
+   avec la souris ou le clavier pour démarrer le jeu.
+
+Le runtime .NET est inclus dans l'exécutable autonome.
+Aucune installation du SDK .NET n'est nécessaire pour le lancer.
+
+Le mode `Simulation` est recommandé par défaut. Le mode
+`RealUserFolders` doit être activé explicitement pour les
+VM de laboratoire autorisées.
+
+## Diagnostic
+
+### Fenêtre de résultat (v4)
 
 La v4 corrige une possible exception de `NAudio` après arrêt du jeu. Si le problème persiste,
 consulter `%LOCALAPPDATA%\Rans0mAwarenessLab\lab-events.log`. Après « Result window shown »,
